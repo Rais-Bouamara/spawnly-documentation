@@ -95,18 +95,20 @@ Il n’y a pas de routeur applicatif ni de règles de réécriture dans les fich
 
 ## 5. Stockage des données
 
-Le code applicatif ne crée pas de schéma SQL. Il persiste les informations dans les fichiers suivants, sous `admin/private/` :
+Le code applicatif ne crée pas de base de données ni de schéma SQL : les données métier sont manipulées comme des tableaux PHP, sérialisées en JSON et stockées dans des fichiers du dossier `admin/private/`, calculé dans `admin/core.php` à partir de `__DIR__ . '/private'` (donc `admin/private/` à la racine du projet). `il_store_read()` crée ce dossier si nécessaire et, si le fichier principal est absent, initialise les données avec `il_seed_store()`. `il_store_write()` encode l’ensemble du tableau au format JSON indenté puis l’écrit dans `store.json` avec `LOCK_EX` (`admin/core.php`). Ce verrou protège l’écriture individuelle du fichier; le code ne met pas en place de transactions applicatives ni de base de données.
 
-| Fichier | Contenu |
+| Chemin relatif à la racine du projet | Données et méthode d’écriture |
 |---|---|
-| `store.json` | Données principales : `admin`, `email`, `categories`, `products` et `messages`. Créé à partir de `il_seed_store()` lorsqu’il manque. |
-| `smtp.json` | Identifiant et mot de passe SMTP séparés des données générales. |
-| `security-log.jsonl` | Journal local, une entrée JSON par ligne : date, événement, détail et empreinte SHA-256 de l’adresse IP. |
-| `attempts-<empreinte>.json` | État du limiteur de tentatives par adresse source : compteur d’échecs et instant de la prochaine tentative. |
+| `admin/private/store.json` | Fichier de données principal. La structure initiale de `il_seed_store()` comporte `admin` (initialement `null`), `email` (adresse de récupération, expéditeur, hôte et port SMTP), `categories`, `products` et `messages` (`admin/core.php`). La création initiale renseigne l’administrateur et l’adresse de récupération (`admin/setup.php`). Chaque produit comprend notamment un identifiant, un nom, une catégorie, une description, un prix, une icône et une illustration (`admin/core.php`, `admin/products.php`); chaque message comprend un identifiant, le nom et l’adresse de l’expéditeur, un sujet, un texte, une date et un indicateur lu/non lu (`api/contact.php`, `admin/messages.php`). Les pages d’administration réécrivent le fichier après les changements de produits, catégories, messages, e-mail ou compte (`admin/products.php`, `admin/categories.php`, `admin/messages.php`, `admin/email.php`, `admin/security.php`). |
+| `admin/private/smtp.json` | Objet JSON séparé contenant `username` et `password` SMTP. Écrit avec `file_put_contents(..., LOCK_EX)` et suivi d’une tentative de permissions `0600` (`admin/core.php`); supprimé par `il_smtp_secrets_clear()` lorsque l’administrateur efface les identifiants (`admin/core.php`, `admin/email.php`). Le mot de passe y est enregistré en clair, pas sous forme de hash. |
+| `admin/private/security-log.jsonl` | Journal JSON Lines : chaque ligne contient date, type d’événement, détail et hash SHA-256 de `REMOTE_ADDR` (`admin/core.php`). Il est ajouté avec verrouillage de fichier; au-delà de 1 Mio, le code le tronque et conserve au plus les 500 dernières lignes avant l’ajout courant (`admin/core.php`). La maintenance peut le vider (`admin/maintenance.php`). |
+| `admin/private/attempts-<SHA-256 de REMOTE_ADDR>.json` | État persistant du limiteur : `failures` et `retry_at`. Le nom du fichier est dérivé de l’adresse source hachée; les lectures/écritures sont verrouillées. Le compteur est plafonné à 20, le délai suit `min(3 × 2^(échecs − 1), 14 400)` secondes et une authentification réussie réinitialise l’état (`admin/core.php`, `admin/login.php`). |
+| `storage/tmp/` | Répertoire de fichiers temporaires; il est créé à la demande si absent. L’outil de maintenance en liste jusqu’à 500 entrées et sa fonction de purge vérifie que le chemin réel est précisément le `storage/tmp` du projet (`admin/core.php`, `admin/maintenance.php`). |
+| Stockage de session PHP | La session `pixundo_admin` contient l’état de connexion et, pendant la récupération, le hash du code, son expiration, le compteur de tentatives et éventuellement le code affiché en mode démo (`admin/core.php`, `admin/reset-start.php`, `admin/reset-finish.php`). L’application ne choisit pas de fichier JSON pour ces données : leur stockage dépend de la configuration PHP, notamment du gestionnaire de sessions actif. |
 
-Dans `store.json`, `admin` est initialement `null`, puis contient notamment le nom, l’adresse de connexion, le hash du mot de passe et la version d’authentification. `email` contient l’adresse de récupération, l’adresse expéditeur, l’hôte et le port SMTP. Les produits ont notamment un identifiant, un nom, une catégorie, une description, un prix et les références d’illustration; les messages contiennent l’expéditeur, le sujet, le texte, la date et l’état lu/non lu.
+Les données présentes à l’exécution sont distinctes des fichiers de code et peuvent être exclues du contrôle de version : `.gitignore` ignore le contenu de `admin/private/` sauf son fichier `.htaccess` et ignore `storage/tmp/`. Les règles Apache du dossier privé et de `storage/` interdisent leur accès HTTP direct (`admin/private/.htaccess`, `storage/.htaccess`). Au moment de l’analyse de cette copie, aucun fichier de données n’était présent dans ces répertoires; les noms et structures ci-dessus décrivent donc le comportement établi par le code, pas des données réelles trouvées sur disque.
 
-`storage/tmp/` est réservé aux fichiers temporaires et peut être purgé par l’administration. Les sessions sont gérées par le mécanisme de sessions PHP; leur emplacement et leur stockage effectif dépendent de la configuration PHP/WAMP et ne sont pas définis dans le projet.
+À ne pas confondre avec ces données : le panier est une `Map` JavaScript en mémoire, sans persistance (`js/app.js`); la sauvegarde est produite en réponse à une requête POST et téléchargée au navigateur, sans être enregistrée par le serveur dans un fichier de sauvegarde (`admin/backup.php`).
 
 ## 6. Authentification, sessions et sécurité
 
@@ -164,9 +166,10 @@ Le code source ne fournit pas de configuration Brevo effective, d’identifiant 
 
 ### Points forts vérifiables
 
-- Séparation lisible entre vitrine, styles, interactions, administration, API, illustrations et stockage.
-- Pas de dépendance réseau front-end obligatoire; les illustrations sont locales et les ressources de base ne reposent pas sur un CDN.
-- Validations des formulaires côté navigateur et côté serveur, encodage des sorties HTML, protection CSRF et contrôles d’accès sur les pages administratives.
-- Politique de mot de passe exigeante, invalidation des autres sessions après changement d’identifiants et ralentissement progressif des tentatives répétées.
-- Limites de démonstration affichées explicitement : aucun paiement, aucun achat et aucun envoi de courriel par le formulaire public.
-- Fonctions pédagogiques d’administration : catalogue, catégories, messages, diagnostic, journaux, export expurgé et purge temporaire circonscrite.
+- Séparation lisible entre vitrine, styles, interactions, administration, endpoints API et illustrations (`index.html`, `css/styles.css`, `js/app.js`, `admin/index.php`, `api/products.php`, `assets/illustrations/keyboard.svg`).
+- Ressources visuelles locales et absence de framework front-end ou de CDN obligatoire (`index.html`, `assets/illustrations/`, `css/styles.css`, `js/app.js`).
+- Validations des champs de contact côté navigateur et côté serveur, encodage des sorties HTML et jetons CSRF sur les formulaires qui modifient l’état (`index.html`, `api/contact.php`, `admin/core.php`).
+- Contrôles de session sur les pages d’administration, politique commune de mot de passe et invalidation des autres sessions après modification des identifiants (`admin/core.php`, `admin/security.php`, `admin/setup.php`).
+- Ralentissement progressif des échecs d’authentification, stockage du compteur séparé par empreinte de l’adresse source et journalisation des événements (`admin/core.php`, `admin/login.php`).
+- Limites pédagogiques explicites : le panier est temporaire et le formulaire de contact annonce qu’aucun courriel n’est envoyé (`index.html`, `js/app.js`, `api/contact.php`).
+- Outils d’administration effectivement présents pour le catalogue, les catégories, les messages, le diagnostic, les journaux, l’export et la purge limitée au dossier temporaire (`admin/products.php`, `admin/categories.php`, `admin/messages.php`, `admin/maintenance.php`, `admin/backup.php`, `admin/core.php`).
